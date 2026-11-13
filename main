@@ -42,9 +42,44 @@ local C_HEAD  = C(130,140,170)
 local RORDER = {"common", "uncommon", "rare", "epic", "legendary", "mythic"}
 local RCOL = {common=C(160,160,160), uncommon=C(80,220,80), rare=C(70,130,255),
               epic=C(180,80,255), legendary=C(255,150,0), mythic=C(255,60,60)}
-local MON_ORDER = {"The Wendell", "The Locust", "The Hollow", "The Rictus", "The Shade", "The Lurker"}
-local MCOL = {["The Wendell"]=C(255,60,60), ["The Locust"]=C(255,150,0), ["The Hollow"]=C(180,80,255),
-              ["The Rictus"]=C(255,80,180), ["The Shade"]=C(80,220,255), ["The Lurker"]=C(80,220,80)}
+
+-- ===== MONSTERS =====
+local MON_ORDER = {"The Wendell", "The Locust", "The Hollow", "The Rictus", "The Maternal Wraith", "The Tenant"}
+local MCOL = {
+    ["The Wendell"]         = C(255, 60, 60),
+    ["The Locust"]          = C(255, 150, 0),
+    ["The Hollow"]          = C(180, 80, 255),
+    ["The Rictus"]          = C(255, 80, 180),
+    ["The Maternal Wraith"] = C(120, 200, 255),
+    ["The Tenant"]          = C(255, 220, 60),
+}
+
+-- EntityKind (lowercase) -> отображаемое имя
+local ENTITY_NAME = {
+    hollow  = "The Hollow",
+    rictus  = "The Rictus",
+    locust  = "The Locust",
+    wendell = "The Wendell",
+    wraith  = "The Maternal Wraith",
+    tenant  = "The Tenant",
+}
+
+-- Полный каталог LootTemplates (ReplicatedStorage.LootTemplates)
+local ITEMS = {
+    "BagOfCash", "BarcodeScanner", "BluetoothSpeaker", "CannedFood", "CameraDrone", "CashDrawer",
+    "Console", "DeskPhone", "DiamondCase", "GeigerCounter", "Guitar", "Keyboard", "LabCase",
+    "MeteoriteSample", "MiniFridge", "Monitor", "Painting", "Phone", "Screwdriver", "SecurityCamera",
+    "ServerBlade", "Skateboard", "Telescope", "Textbooks", "Toolbox", "VHSStack", "VRHeadset", "Watch",
+    "Bag", "DeskFan", "Laptop", "Headphones", "Camera", "Microwave", "Hammer", "BarricadeKit",
+    "CoffeeMug", "FireExtinguisher", "DeskLamp", "Tablet", "RecordPlayer", "Projector", "GraphicsCard",
+    "HardDrive", "Dossier", "CryptoWallet", "GoldBar", "Potions", "Spellbook", "JackOLantern",
+    "CrystalBall", "Candelabra", "Candy", "TeddyBear", "Stapler", "AlarmClock", "Stethoscope",
+    "VitalsMonitor", "EspressoMachine", "RotaryPhone", "Typewriter", "OxygenTank", "CRTTV",
+    "Defibrillator", "PortableUltrasound", "Microscope", "PlutoniumCore",
+}
+local ITEM_SET = {}
+for _, n in ipairs(ITEMS) do ITEM_SET[n] = true end
+
 local ACOL = {alert = C(255,60,60)}
 local BASE = {Part=1, MeshPart=1, UnionOperation=1, WedgePart=1}
 
@@ -444,18 +479,40 @@ local function boxHeight(part)
     return h
 end
 
+-- ===== LootTemplates fallback =====
+local LootTemplates = nil
+local function getTemplate(name)
+    if LootTemplates == nil then
+        local ok, f = pcall(function()
+            return game:GetService("ReplicatedStorage"):FindFirstChild("LootTemplates")
+        end)
+        LootTemplates = (ok and f) or false
+    end
+    if not LootTemplates then return nil end
+    local ok, t = pcall(function() return LootTemplates:FindFirstChild(name) end)
+    return (ok and t) or nil
+end
+
 -- ===== staged scan (a few items per frame, no big hitch) =====
 local loot, mons = {}, {}
-local sc = {stage = 0, nextAt = 0, q = {}, qi = 1, nl = {}, nm = {}, mi = 1}
-local monObj, monEnt = {}, {}
+local sc = {stage = 0, nextAt = 0, q = {}, qi = 1, nl = {}, nm = {}, cand = nil, ci = 1}
 
 local function buildLoot(o)
     local part = getPart(o)
     if not part then return nil end
     local r = attr(o, "Rarity")
-    r = r and string.lower(tostring(r)) or nil
     local v = tonumber(attr(o, "Value"))
     local w = tonumber(attr(o, "Weight"))
+    -- если атрибуты пропали с живого лута — берём из LootTemplates
+    if (r == nil or v == nil or w == nil) and ITEM_SET[o.Name] then
+        local tmpl = getTemplate(o.Name)
+        if tmpl then
+            if r == nil then r = attr(tmpl, "Rarity") end
+            if v == nil then v = tonumber(attr(tmpl, "Value")) end
+            if w == nil then w = tonumber(attr(tmpl, "Weight")) end
+        end
+    end
+    r = r and string.lower(tostring(r)) or nil
     local base = o.Name
     if v then base = base .. " $" .. math.floor(v) end
     if w then base = base .. " " .. (math.floor(w * 10 + 0.5) / 10) .. "kg" end
@@ -476,7 +533,7 @@ local function scanStep(now)
                     end
                 end
             end
-            s.qi, s.nl, s.nm, s.mi = 1, {}, {}, 1
+            s.qi, s.nl, s.nm, s.cand, s.ci = 1, {}, {}, nil, 1
             s.stage = 1
         end
     elseif s.stage == 1 then
@@ -490,40 +547,46 @@ local function scanStep(now)
         end
         if s.qi > #s.q then s.stage = 2 end
     elseif s.stage == 2 then
+        -- снимок прямых детей workspace (монстры и The Tenant — прямые дети)
+        if not s.cand then
+            s.cand = {}
+            local root = workspace:FindFirstChild("Monsters") or workspace
+            local ok, kids = pcall(function() return root:GetChildren() end)
+            if ok and kids then
+                for i = 1, #kids do s.cand[i] = kids[i] end
+            end
+            s.ci, s.nm = 1, {}
+        end
+
         local n = 0
-        while s.mi <= #MON_ORDER and n < 2 do
-            local name = MON_ORDER[s.mi]
-            s.mi = s.mi + 1
+        while s.ci <= #s.cand and n < 10 do
+            local o = s.cand[s.ci]
+            s.ci = s.ci + 1
             n = n + 1
-            local m = monObj[name]
-            if m then
-                local ok, p = pcall(function() return m.Parent end)
-                if not ok or not p then
-                    m = nil
-                    monObj[name] = nil
-                    monEnt[name] = nil
-                end
-            end
-            if not m then
-                m = workspace:FindFirstChild(name)
-                monObj[name] = m
-            end
-            if m then
-                local e = monEnt[name]
-                if not e then
-                    local ok, part = pcall(getPart, m)
-                    if ok and part then
-                        e = {part = part, base = name, h = boxHeight(part), dm = -1, txt = name}
-                        monEnt[name] = e
+            local cls = o.ClassName
+            -- быстрый фильтр: проверяем атрибут только у Model/Folder
+            if cls == "Model" or cls == "Folder" then
+                local ek = attr(o, "EntityKind")
+                if ek then
+                    local disp = ENTITY_NAME[string.lower(tostring(ek))]
+                    if disp then
+                        local ok, part = pcall(getPart, o)
+                        if ok and part then
+                            s.nm[#s.nm + 1] = {
+                                part = part, base = disp,
+                                h = boxHeight(part), dm = -1, txt = disp,
+                            }
+                        end
                     end
                 end
-                if e then s.nm[#s.nm + 1] = e end
             end
         end
-        if s.mi > #MON_ORDER then
+
+        if s.ci > #s.cand then
             loot, mons = s.nl, s.nm
             s.stage = 0
             s.nextAt = now + SCAN_EVERY
+            s.cand = nil
         end
     end
 end
