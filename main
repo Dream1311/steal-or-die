@@ -1,5 +1,6 @@
--- Steal or Die ESP v23: menu (drag + rebind + palette) + loot + monsters (2D box) + alert + instant grab
+-- Steal or Die ESP v24: menu instant grab
 -- anti-freeze: per-frame pcall, staged scan, cached mouse/viewport
+-- v24: EntityKind-based monster detection (Wraith + Tenant), LootTemplates fallback, isRealEntity filter
 
 if _G.ESP_CLEAN then pcall(_G.ESP_CLEAN) end
 local TOKEN = tostring(os.clock())
@@ -12,6 +13,8 @@ repeat
     if not lp then wait(0.5) end
 until lp
 repeat wait(0.2) until workspace and workspace.CurrentCamera
+
+local PlayersSvc = game:GetService("Players")
 
 -- ===== settings =====
 local KEYS = {menu = 0x2D, grab = 0x52}   -- INSERT and R (changeable in the menu)
@@ -479,6 +482,68 @@ local function boxHeight(part)
     return h
 end
 
+-- ===== entity sanity filter =====
+-- отсекает шаблоны, трупы, припаркованные модели, своего персонажа
+local function isRealEntity(model, part)
+    if not part:IsDescendantOf(workspace) then return false end
+    if part:FindFirstAncestor("Camera") then return false end
+
+    -- себя не обводим
+    local myChar = lp.Character
+    if myChar and (myChar == model or part:IsDescendantOf(myChar)) then
+        return false
+    end
+
+    -- мёртвый Humanoid -> пропускаем
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if hum then
+        local ok, hp = pcall(function() return hum.Health end)
+        if ok and type(hp) == "number" and hp <= 0 then return false end
+    end
+
+    -- должна быть хотя бы одна видимая часть
+    local visible = false
+    local okT, tr = pcall(function() return part.Transparency end)
+    if okT and type(tr) == "number" and tr < 1 then
+        visible = true
+    else
+        local okK, kids = pcall(function() return model:GetChildren() end)
+        if okK and kids then
+            for i = 1, #kids do
+                local d = kids[i]
+                if BASE[d.ClassName] then
+                    local ok2, t2 = pcall(function() return d.Transparency end)
+                    if ok2 and type(t2) == "number" and t2 < 1 then
+                        visible = true
+                        break
+                    end
+                end
+            end
+        end
+    end
+    if not visible then return false end
+
+    -- не припаркован за пределами мира
+    local okP, px, py, pz = pcall(xyz, part)
+    if okP and px and (py < -500 or py > 5000) then return false end
+
+    -- staging-контейнеры (pool / templates / lobby / preload / showcase)
+    local p = part.Parent
+    while p and p ~= workspace do
+        local okN, n = pcall(function() return p.Name end)
+        if okN and type(n) == "string" then
+            local ln = n:lower()
+            if ln == "pool" or ln == "template" or ln == "templates"
+               or ln == "lobby" or ln == "preload" or ln == "showcase" then
+                return false
+            end
+        end
+        p = p.Parent
+    end
+
+    return true
+end
+
 -- ===== LootTemplates fallback =====
 local LootTemplates = nil
 local function getTemplate(name)
@@ -571,7 +636,7 @@ local function scanStep(now)
                     local disp = ENTITY_NAME[string.lower(tostring(ek))]
                     if disp then
                         local ok, part = pcall(getPart, o)
-                        if ok and part then
+                        if ok and part and isRealEntity(o, part) then
                             s.nm[#s.nm + 1] = {
                                 part = part, base = disp,
                                 h = boxHeight(part), dm = -1, txt = disp,
