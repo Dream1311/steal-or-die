@@ -1,4 +1,4 @@
--- Steal or Die ESP v31.2
+-- Steal or Die ESP v31.3
 -- anti-freeze: per-frame pcall, staged scan, cached mouse/viewport
 
 if _G.ESP_CLEAN then pcall(_G.ESP_CLEAN) end
@@ -34,9 +34,10 @@ local TOP_PAD_H = TOP_PAD * 2
 
 local LOOT_FOLDERS = {"MyLoot", "LootItems"}
 local LOOT_DIST, MON_DIST, ALERT_DIST = 2000, 3000, 40
-local SCAN_EVERY, POOL, BOX_SLOTS = 3, 35, 8
+local SCAN_EVERY, POOL, BOX_SLOTS = 3, 35, 16
 local BOX_RATIO, PAD, LABEL_GAP = 0.55, 0.15, 18
 local BUDGET = 6
+local WS_BUDGET = 50
 
 local SET = {minval = 0}
 local SL_MAX, SL_STEP = 5000, 50
@@ -46,7 +47,8 @@ local CONFIG_FILE = "steal_or_die_cfg.json"
 local CONFIG_VERSION = 2
 
 local CFG = {
-    master = true, loot = true, screwdriver = true, box = true, label = true, alert = true, tenant_disguise = true, grab = true, infstam = false,
+    master = true, loot = true, screwdriver = true, box = true, label = true, alert = true,
+    tenant_disguise = true, grab = true, infstam = false,
     show_common = true, show_uncommon = true, show_rare = true, show_epic = true, show_legendary = true, show_mythic = true,
     show_secret = true, show_boundless = true,
     max_weight_common = 0, max_weight_uncommon = 0, max_weight_rare = 0,
@@ -170,12 +172,12 @@ for i = 1, BOX_SLOTS do
     local ol = Drawing.new("Square"); ol.Filled = false; ol.Thickness = 4; ol.Color = BLACK; ol.Visible = false
     local b = Drawing.new("Square"); b.Filled = false; b.Thickness = 2; b.Visible = false
     local t = Drawing.new("Text"); t.Size = 15; t.Center = true; t.Outline = true; t.Visible = false
-    boxes[i] = {ol = ol, b = b, t = t, sb = false, st = false, txt = "", col = nil}
+    boxes[i] = {ol = ol, b = b, t = t, sb = false, st = false, txt = "", col = nil, px = -9999, py = -9999, w = -1, h = -1}
 end
 local alerts = {}
 for i = 1, 3 do
     local t = Drawing.new("Text"); t.Size = 24; t.Center = true; t.Outline = true; t.Visible = false
-    alerts[i] = {t = t, txt = "", on = false, col = nil}
+    alerts[i] = {t = t, txt = "", on = false, col = nil, py = -9999}
 end
 
 -- ===== menu drawings =====
@@ -192,11 +194,13 @@ local function tx(size, color, text, list)
     t.Size = size; t.Outline = true; t.Color = color; t.Text = text or ""; t.Visible = false; return t
 end
 
+-- 1. Background layers (must be created BEFORE tabs so they don't overlap them)
 local bgOut  = sq(ACCENT, false); bgOut.Thickness = 1
 local bg     = sq(C_BG)
 local bar    = sq(C_BAR)
 local accent = sq(ACCENT)
 
+-- 2. Tabs (created after bg, so they render on top of it)
 local TABS = {"MAIN", "FILTER", "CONFIG", "COLORS"}
 local activeTab = "MAIN"
 local tabHover = nil
@@ -207,12 +211,14 @@ for i = 1, #TABS do
     tabBtns[i] = {name = TABS[i], bg = tbg, txt = txt}
 end
 
+-- 3. Header and controls
 local ttl    = tx(16, WHITE, "ESP MENU")
 local minBtn = sq(C_HOVER)
 local minOut = sq(ACCENT, false); minOut.Thickness = 1
 local minTxt = tx(14, WHITE, "-")
 local hl     = sq(C_HOVER)
 
+-- resize grip: 3 small diagonal dots in bottom-right corner
 local gripDots = {}
 for i = 1, 3 do gripDots[i] = sq(C_HEAD) end
 
@@ -222,6 +228,7 @@ local function add(kind, label, tbl, key, tab)
     items[#items + 1] = {k = kind, l = label, t = tbl, key = key, tab = tab or "MAIN"}
 end
 
+-- MAIN tab
 add("b", "Menu key", nil, "menu", "MAIN")
 add("b", "Grab key", nil, "grab", "MAIN")
 add("h", "FEATURES", nil, nil, "MAIN")
@@ -236,6 +243,7 @@ add("t", "Entity label", CFG, "label", "MAIN")
 add("t", "Entity alert", CFG, "alert", "MAIN")
 add("t", "Tenant disguise", CFG, "tenant_disguise", "MAIN")
 
+-- FILTER tab
 add("h", "LOOT FILTER", nil, nil, "FILTER")
 add("t", "Show Common", CFG, "show_common", "FILTER")
 add("t", "Show Uncommon", CFG, "show_uncommon", "FILTER")
@@ -255,11 +263,13 @@ add("w", "Mythic", CFG, "max_weight_mythic", "FILTER")
 add("w", "Secret", CFG, "max_weight_secret", "FILTER")
 add("w", "Boundless", CFG, "max_weight_boundless", "FILTER")
 
+-- CONFIG tab
 add("h", "CONFIG", nil, nil, "CONFIG")
 add("act", "Save Config", nil, "save", "CONFIG")
 add("act", "Load Config", nil, "load", "CONFIG")
 add("act", "Reset Config", nil, "reset", "CONFIG")
 
+-- COLORS tab
 add("h", "LOOT COLORS", nil, nil, "COLORS")
 for _, r in ipairs(RORDER) do add("c", r, RCOL, r, "COLORS") end
 add("h", "ENTITY COLORS", nil, nil, "COLORS")
@@ -267,6 +277,7 @@ for _, m in ipairs(MON_ORDER) do add("c", m, MCOL, m, "COLORS") end
 add("h", "ALERT COLOR", nil, nil, "COLORS")
 add("c", "Alert text", ACOL, "alert", "COLORS")
 
+-- compute per-tab index and max rows (square-ish fixed menu size)
 local tabCounts = {}
 for _, it in ipairs(items) do
     tabCounts[it.tab] = (tabCounts[it.tab] or 0) + 1
@@ -277,13 +288,15 @@ for _, n in pairs(tabCounts) do
     if n > maxItemsPerTab then maxItemsPerTab = n end
 end
 
+-- row offset from MY: header + tab bar + top pad
 local ROW_BASE = curTH + curTH + TOP_PAD
 local HEIGHT = curTH + curTH + TOP_PAD_H + maxItemsPerTab * curRH
 
 for i, it in ipairs(items) do
     it.ry = ROW_BASE + (it.tabIdx - 1) * curRH
     if it.k == "h" then
-        it.lt = tx(12, C_HEAD, it.l); it.ln = sq(C_BAR)
+        it.lt = tx(12, C_HEAD, it.l)
+        it.ln = sq(C_BAR)
     else
         it.lt = tx(14, WHITE, it.l)
     end
@@ -443,18 +456,25 @@ local function tabLayout()
     for i, btn in ipairs(tabBtns) do
         local px = MX + (i - 1) * baseW
         local w = (i == n) and (MW - (i - 1) * baseW) or baseW
-        btn.x = px; btn.y = tabY; btn.w = w; btn.h = curTH
-        btn.bg.Position = Vector2.new(px, tabY); btn.bg.Size = Vector2.new(w, curTH)
+        btn.x = px
+        btn.y = tabY
+        btn.w = w
+        btn.h = curTH
+        btn.bg.Position = Vector2.new(px, tabY)
+        btn.bg.Size = Vector2.new(w, curTH)
         btn.txt.Position = Vector2.new(
             px + math.floor((w - btn.txt.Size * #btn.name * 0.52) / 2),
             tabY + math.floor((curTH - btn.txt.Size) / 2)
         )
         if btn.name == activeTab then
-            btn.bg.Color = ACCENT; btn.txt.Color = BLACK
+            btn.bg.Color = ACCENT
+            btn.txt.Color = BLACK
         elseif btn.name == tabHover then
-            btn.bg.Color = C_HOVER; btn.txt.Color = WHITE
+            btn.bg.Color = C_HOVER
+            btn.txt.Color = WHITE
         else
-            btn.bg.Color = C_BAR; btn.txt.Color = C_HEAD
+            btn.bg.Color = C_BAR
+            btn.txt.Color = C_HEAD
         end
     end
 end
@@ -472,15 +492,20 @@ local function layout()
     ROW_BASE = curTH + curTH + TOP_PAD
     HEIGHT = curTH + curTH + TOP_PAD_H + maxItemsPerTab * curRH
 
+    -- clamp to viewport
     local cam = workspace.CurrentCamera
     if cam then
         local ok1, vx = pcall(function() return cam.ViewportSize.X end)
-        if ok1 and type(vx) == "number" and vx > 100 and MX + MW > vx - 8 then MX = math.max(8, vx - MW - 8) end
+        if ok1 and type(vx) == "number" and vx > 100 and MX + MW > vx - 8 then
+            MX = math.max(8, vx - MW - 8)
+        end
         local ok2, vy = pcall(function() return cam.ViewportSize.Y end)
         if ok2 and type(vy) == "number" and vy > 100 then
             vpHeight = vy
             local dispH = minimized and curTH or HEIGHT
-            if MY + dispH > vy - 8 then MY = math.max(8, vy - dispH - 8) end
+            if MY + dispH > vy - 8 then
+                MY = math.max(8, vy - dispH - 8)
+            end
         end
     end
 
@@ -511,7 +536,10 @@ local function layout()
     local knH = math.floor(12 * sc + 0.5)
     local knW = math.floor(6 * sc + 0.5)
 
-    for _, btn in ipairs(tabBtns) do btn.txt.Size = tabFont end
+    -- tab bar
+    for _, btn in ipairs(tabBtns) do
+        btn.txt.Size = tabFont
+    end
     tabLayout()
 
     for i, it in ipairs(items) do
@@ -522,7 +550,8 @@ local function layout()
         if it.k == "h" then
             it.lt.Size = headFont
             it.lt.Position = Vector2.new(MX + 10, y + math.floor((curRH - headFont) / 2))
-            it.ln.Position = Vector2.new(MX + 8, y + curRH - 2); it.ln.Size = Vector2.new(MW - 16, 1)
+            it.ln.Position = Vector2.new(MX + 8, y + curRH - 2)
+            it.ln.Size = Vector2.new(MW - 16, 1)
         else
             it.lt.Size = baseFont
             it.lt.Position = Vector2.new(MX + 14, y + math.floor((curRH - baseFont) / 2))
@@ -544,17 +573,22 @@ local function layout()
             it.sv.Size = math.max(11, baseFont - 1)
             it.sv.Position = Vector2.new(MX + curSL_X + curSL_W + 6, y + math.floor((curRH - math.max(11, baseFont - 1)) / 2))
         elseif it.k == "act" then
-            local acW = math.floor(34 * sc + 0.5); local acH = curRH - 6
-            it.ac.Position = Vector2.new(MX + MW - acW - 10, y + math.floor((curRH - acH) / 2)); it.ac.Size = Vector2.new(acW, acH)
+            local acW = math.floor(34 * sc + 0.5)
+            local acH = curRH - 6
+            it.ac.Position = Vector2.new(MX + MW - acW - 10, y + math.floor((curRH - acH) / 2))
+            it.ac.Size = Vector2.new(acW, acH)
         end
         refresh(it)
     end
 
+    -- resize grip dots
     local gx, gy = gripPos()
     for i = 1, 3 do
         local off = (i - 1) * 4
-        gripDots[i].Position = Vector2.new(gx - off, gy - off); gripDots[i].Size = Vector2.new(3, 3)
+        gripDots[i].Position = Vector2.new(gx - off, gy - off)
+        gripDots[i].Size = Vector2.new(3, 3)
     end
+
     if popOpen and not minimized then playout() end
 end
 
@@ -580,24 +614,49 @@ end
 local function applyMenuVisibility()
     if not menuOpen then
         for _, d in ipairs(mlist) do d.Visible = false end
-        hl.Visible = false; hoverIt = nil; closePopup(); return
+        hl.Visible = false
+        hoverIt = nil
+        closePopup()
+        return
     end
-    bgOut.Visible = true; bg.Visible = true; bar.Visible = true; accent.Visible = true
-    ttl.Visible = true; minBtn.Visible = true; minOut.Visible = true; minTxt.Visible = true
+
+    bgOut.Visible  = true
+    bg.Visible     = true
+    bar.Visible    = true
+    accent.Visible = true
+    ttl.Visible    = true
+    minBtn.Visible = true
+    minOut.Visible = true
+    minTxt.Visible = true
+
     local showBody = not minimized
-    for _, btn in ipairs(tabBtns) do btn.bg.Visible = showBody; btn.txt.Visible = showBody end
-    for _, it in ipairs(items) do setItemVis(it, showBody) end
+    for _, btn in ipairs(tabBtns) do
+        btn.bg.Visible = showBody
+        btn.txt.Visible = showBody
+    end
+    for _, it in ipairs(items) do
+        setItemVis(it, showBody)
+    end
     for _, d in ipairs(gripDots) do d.Visible = showBody end
-    if not showBody then hl.Visible = false; hoverIt = nil; closePopup() end
+    if not showBody then
+        hl.Visible = false
+        hoverIt = nil
+        closePopup()
+    end
 end
 
 local function setMenu(b)
-    menuOpen = b; layout(); applyMenuVisibility()
+    menuOpen = b
+    layout()
+    applyMenuVisibility()
 end
 
 local function switchTab(name)
     if activeTab == name then return end
-    activeTab = name; closePopup(); layout(); applyMenuVisibility()
+    activeTab = name
+    closePopup()
+    layout()
+    applyMenuVisibility()
 end
 
 -- ===== config save / load / reset =====
@@ -605,15 +664,23 @@ local function colorToArr(c) return {math.floor(c.R*255+0.5), math.floor(c.G*255
 local function arrToColor(a) return Color3.fromRGB(a[1], a[2], a[3]) end
 
 local function saveConfig()
-    local cfgCopy = {}; for k, v in pairs(CFG) do cfgCopy[k] = v end
+    local cfgCopy = {}
+    for k, v in pairs(CFG) do cfgCopy[k] = v end
     local rcolCopy, mcolCopy = {}, {}
     for k, v in pairs(RCOL) do rcolCopy[k] = colorToArr(v) end
     for k, v in pairs(MCOL) do mcolCopy[k] = colorToArr(v) end
     local data = {
-        version = CONFIG_VERSION, cfg = cfgCopy, minval = SET.minval,
-        keys = {menu = KEYS.menu, grab = KEYS.grab}, rcol = rcolCopy, mcol = mcolCopy,
+        version = CONFIG_VERSION,
+        cfg = cfgCopy,
+        minval = SET.minval,
+        keys = {menu = KEYS.menu, grab = KEYS.grab},
+        rcol = rcolCopy,
+        mcol = mcolCopy,
         acol_alert = colorToArr(ACOL.alert),
-        ui = {x = MX, y = MY, mw = MW, rh = curRH, th = curTH, minimized = minimized, activeTab = activeTab},
+        ui = {
+            x = MX, y = MY, mw = MW, rh = curRH, th = curTH,
+            minimized = minimized, activeTab = activeTab,
+        },
     }
     local HttpService = game:GetService("HttpService")
     local ok, json = pcall(function() return HttpService:JSONEncode(data) end)
@@ -631,15 +698,29 @@ local function loadConfig()
     local ok2, data = pcall(function() return HttpService:JSONDecode(raw) end)
     if not ok2 or type(data) ~= "table" then return false end
 
-    if type(data.cfg) == "table" then for k, v in pairs(data.cfg) do if CFG[k] ~= nil and type(CFG[k]) == type(v) then CFG[k] = v end end end
+    if type(data.cfg) == "table" then
+        for k, v in pairs(data.cfg) do
+            if CFG[k] ~= nil and type(CFG[k]) == type(v) then CFG[k] = v end
+        end
+    end
     if type(data.minval) == "number" then SET.minval = data.minval end
     if type(data.keys) == "table" then
         if type(data.keys.menu) == "number" then KEYS.menu = data.keys.menu end
         if type(data.keys.grab) == "number" then KEYS.grab = data.keys.grab end
     end
-    if type(data.rcol) == "table" then for k, v in pairs(data.rcol) do if RCOL[k] and type(v) == "table" and #v >= 3 then RCOL[k] = arrToColor(v) end end end
-    if type(data.mcol) == "table" then for k, v in pairs(data.mcol) do if MCOL[k] and type(v) == "table" and #v >= 3 then MCOL[k] = arrToColor(v) end end end
-    if type(data.acol_alert) == "table" and #data.acol_alert >= 3 then ACOL.alert = arrToColor(data.acol_alert) end
+    if type(data.rcol) == "table" then
+        for k, v in pairs(data.rcol) do
+            if RCOL[k] and type(v) == "table" and #v >= 3 then RCOL[k] = arrToColor(v) end
+        end
+    end
+    if type(data.mcol) == "table" then
+        for k, v in pairs(data.mcol) do
+            if MCOL[k] and type(v) == "table" and #v >= 3 then MCOL[k] = arrToColor(v) end
+        end
+    end
+    if type(data.acol_alert) == "table" and #data.acol_alert >= 3 then
+        ACOL.alert = arrToColor(data.acol_alert)
+    end
     if type(data.ui) == "table" then
         if type(data.ui.x) == "number" then MX = math.max(0, data.ui.x) end
         if type(data.ui.y) == "number" then MY = math.max(0, data.ui.y) end
@@ -647,40 +728,75 @@ local function loadConfig()
         if type(data.ui.rh) == "number" then curRH = clamp(data.ui.rh, MIN_RH, MAX_RH) end
         if type(data.ui.th) == "number" then curTH = math.max(24, data.ui.th) end
         if type(data.ui.minimized) == "boolean" then minimized = data.ui.minimized end
-        if type(data.ui.activeTab) == "string" then for _, t in ipairs(TABS) do if t == data.ui.activeTab then activeTab = t; break end end end
+        if type(data.ui.activeTab) == "string" then
+            for _, t in ipairs(TABS) do
+                if t == data.ui.activeTab then activeTab = t; break end
+            end
+        end
     end
-    closePopup(); layout(); applyMenuVisibility(); return true
+
+    closePopup()
+    layout()
+    applyMenuVisibility()
+    return true
 end
 
 local function resetConfig()
     for k, v in pairs(DEFAULT_CFG) do CFG[k] = v end
-    SET.minval = DEFAULT_SET.minval; KEYS.menu = DEFAULT_KEYS.menu; KEYS.grab = DEFAULT_KEYS.grab
-    RCOL.common = C(160,160,160); RCOL.uncommon = C(80,220,80); RCOL.rare = C(70,130,255)
-    RCOL.epic = C(180,80,255); RCOL.legendary = C(255,150,0); RCOL.mythic = C(255,60,60)
-    RCOL.secret = GOLD; RCOL.boundless = GOLD
-    MCOL["The Wendell"] = C(255,60,60); MCOL["The Locust"]  = C(255,150,0)
-    MCOL["The Hollow"]  = C(180,80,255); MCOL["The Rictus"]  = C(255,80,180)
-    MCOL["The Shade"]   = C(80,220,255); MCOL["The Lurker"]  = C(80,220,80)
-    MCOL["The Wraith"]  = C(140,160,255); MCOL["The Tenant"]  = C(255,235,70)
-    ACOL.alert = C(255,60,60); MW = DEFAULT_SIZE.mw; curRH = DEFAULT_SIZE.rh; curTH = DEFAULT_SIZE.th
-    minimized = false; activeTab = "MAIN"; closePopup(); layout(); applyMenuVisibility()
+    SET.minval = DEFAULT_SET.minval
+    KEYS.menu = DEFAULT_KEYS.menu
+    KEYS.grab = DEFAULT_KEYS.grab
+    RCOL.common    = C(160,160,160)
+    RCOL.uncommon  = C(80,220,80)
+    RCOL.rare      = C(70,130,255)
+    RCOL.epic      = C(180,80,255)
+    RCOL.legendary = C(255,150,0)
+    RCOL.mythic    = C(255,60,60)
+    RCOL.secret    = GOLD
+    RCOL.boundless = GOLD
+    MCOL["The Wendell"] = C(255,60,60)
+    MCOL["The Locust"]  = C(255,150,0)
+    MCOL["The Hollow"]  = C(180,80,255)
+    MCOL["The Rictus"]  = C(255,80,180)
+    MCOL["The Shade"]   = C(80,220,255)
+    MCOL["The Lurker"]  = C(80,220,80)
+    MCOL["The Wraith"]  = C(140,160,255)
+    MCOL["The Tenant"]  = C(255,235,70)
+    ACOL.alert = C(255,60,60)
+    MW = DEFAULT_SIZE.mw
+    curRH = DEFAULT_SIZE.rh
+    curTH = DEFAULT_SIZE.th
+    minimized = false
+    activeTab = "MAIN"
+    closePopup()
+    layout()
+    applyMenuVisibility()
 end
 
-layout(); setMenu(true)
+layout()
+setMenu(true)
 
-pcall(function() if isfile(CONFIG_FILE) then loadConfig() end end)
+pcall(function()
+    if isfile(CONFIG_FILE) then loadConfig() end
+end)
 
 local function removeAll()
     for _, s in ipairs(pool) do pcall(function() s.t:Remove() end) end
     for _, s in ipairs(alerts) do pcall(function() s.t:Remove() end) end
-    for _, s in ipairs(boxes) do pcall(function() s.ol:Remove() end); pcall(function() s.b:Remove() end); pcall(function() s.t:Remove() end) end
+    for _, s in ipairs(boxes) do
+        pcall(function() s.ol:Remove() end)
+        pcall(function() s.b:Remove() end)
+        pcall(function() s.t:Remove() end)
+    end
     for _, d in ipairs(mlist) do pcall(function() d:Remove() end) end
     for _, d in ipairs(plist) do pcall(function() d:Remove() end) end
 end
 
 _G.ESP_CLEAN = function()
     _G.ESP_TOKEN = nil
-    if origStamina ~= nil and lp then pcall(function() lp:SetAttribute("UpgradeStamina", origStamina) end) end
+    if origStamina ~= nil and lp then
+        pcall(function() lp:SetAttribute("UpgradeStamina", origStamina) end)
+    end
     removeAll()
 end
 
@@ -695,38 +811,68 @@ local function mousePos()
         local ok, x, y = pcall(function() return mouseObj.X, mouseObj.Y end)
         if ok and type(x) == "number" then return x, y end
     end
-    local ok, x, y = pcall(function() local p = getmouseposition(); return p.X, p.Y end)
+    local ok, x, y = pcall(function()
+        local p = getmouseposition()
+        return p.X, p.Y
+    end)
     if ok and type(x) == "number" then return x, y end
     return nil
 end
 
-local function keyDown(c) local ok, v = pcall(iskeypressed, c); return ok and v end
+local function keyDown(c)
+    local ok, v = pcall(iskeypressed, c)
+    return ok and v
+end
 
 local function click(it)
-    if it.k == "t" then it.t[it.key] = not it.t[it.key]; refresh(it)
-    elseif it.k == "c" then openPopup(it)
-    elseif it.k == "b" then it.listen = true; refresh(it)
+    if it.k == "t" then
+        it.t[it.key] = not it.t[it.key]
+        refresh(it)
+    elseif it.k == "c" then
+        openPopup(it)
+    elseif it.k == "b" then
+        it.listen = true
+        refresh(it)
     elseif it.k == "act" then
-        if it.key == "save" then local ok = saveConfig(); msg(ok and "Config saved!" or "Save failed!")
-        elseif it.key == "load" then local ok = loadConfig(); msg(ok and "Config loaded!" or "No config / load failed!")
-        elseif it.key == "reset" then resetConfig(); msg("Config reset to defaults!") end
+        if it.key == "save" then
+            local ok = saveConfig()
+            msg(ok and "Config saved!" or "Save failed!")
+        elseif it.key == "load" then
+            local ok = loadConfig()
+            msg(ok and "Config loaded!" or "No config / load failed!")
+        elseif it.key == "reset" then
+            resetConfig()
+            msg("Config reset to defaults!")
+        end
     end
 end
 
 local function scanKey()
     for c = 8, 254 do
-        if c ~= 1 and c ~= 2 and c ~= 4 and c ~= 5 and c ~= 6 and keyDown(c) then return c end
+        if c ~= 1 and c ~= 2 and c ~= 4 and c ~= 5 and c ~= 6 and keyDown(c) then
+            return c
+        end
     end
     return nil
 end
 
 -- ===== helpers =====
-local function xyz(part) local p = part.Position; return p.X, p.Y, p.Z end
+local function xyz(part)
+    local p = part.Position
+    return p.X, p.Y, p.Z
+end
 local function getPart(o)
     if BASE[o.ClassName] then return o end
-    return o:FindFirstChild("HumanoidRootPart") or o:FindFirstChild("RootPart") or o.PrimaryPart or o:FindFirstChildWhichIsA("BasePart")
+    return o:FindFirstChild("HumanoidRootPart")
+        or o:FindFirstChild("RootPart")
+        or o.PrimaryPart
+        or o:FindFirstChildWhichIsA("BasePart")
 end
-local function attr(o, k) local ok, v = pcall(o.GetAttribute, o, k); return ok and v or nil end
+local function attr(o, k)
+    local ok, v = pcall(o.GetAttribute, o, k)
+    if ok then return v end
+    return nil
+end
 local function boxHeight(part)
     local h = 5.5
     if part.Name ~= "HumanoidRootPart" and part.Name ~= "RootPart" then
@@ -736,22 +882,68 @@ local function boxHeight(part)
     return h
 end
 
+local function detectPlayerEntityKind(p, char, isDisguised)
+    if isDisguised then
+        return "The Tenant"
+    end
+    local checkAttrs = {"PlayerEntity", "Entity", "EntityName", "EntityType", "Kind", "SelectedEntity"}
+    for _, k in ipairs(checkAttrs) do
+        local v1 = char and attr(char, k)
+        local n1 = normEntityName(v1)
+        if n1 then return n1 end
+        local v2 = attr(p, k)
+        local n2 = normEntityName(v2)
+        if n2 then return n2 end
+    end
+    if char then
+        local rp = char:FindFirstChild("RootPart")
+        if rp and (rp:FindFirstChild("REye") or rp:FindFirstChild("LEye")) then
+            return "The Tenant"
+        end
+        local ok, kids = pcall(function() return char:GetChildren() end)
+        if ok and kids then
+            for i = 1, #kids do
+                local n = normEntityName(kids[i].Name)
+                if n then return n end
+            end
+        end
+    end
+    return nil
+end
+
+local STATIC_RIGS = {
+    AdminPunchRig = true,
+    KillVictimPreview = true,
+    ["The Hollow Menu"] = true,
+    SlideRig = true,
+    VaultRig = true,
+}
+
 local function isRealEntity(model, part)
     if not part:IsDescendantOf(workspace) then return false end
     if part:FindFirstAncestor("Camera") then return false end
     local myChar = lp.Character
     if myChar and (myChar == model or part:IsDescendantOf(myChar)) then return false end
     local hum = model:FindFirstChildOfClass("Humanoid")
-    if hum then local ok, hp = pcall(function() return hum.Health end); if ok and type(hp) == "number" and hp <= 0 then return false end end
+    if hum then
+        local ok, hp = pcall(function() return hum.Health end)
+        if ok and type(hp) == "number" and hp <= 0 then return false end
+    end
     local visible = false
     local okT, tr = pcall(function() return part.Transparency end)
-    if okT and type(tr) == "number" and tr < 1 then visible = true
+    if okT and type(tr) == "number" and tr < 1 then
+        visible = true
     else
         local okK, kids = pcall(function() return model:GetChildren() end)
         if okK and kids then
             for i = 1, #kids do
                 local d = kids[i]
-                if BASE[d.ClassName] then local ok2, t2 = pcall(function() return d.Transparency end); if ok2 and type(t2) == "number" and t2 < 1 then visible = true; break end end
+                if BASE[d.ClassName] then
+                    local ok2, t2 = pcall(function() return d.Transparency end)
+                    if ok2 and type(t2) == "number" and t2 < 1 then
+                        visible = true; break
+                    end
+                end
             end
         end
     end
@@ -763,7 +955,10 @@ local function isRealEntity(model, part)
         local okN, n = pcall(function() return p.Name end)
         if okN and type(n) == "string" then
             local ln = n:lower()
-            if ln == "pool" or ln == "template" or ln == "templates" or ln == "lobby" or ln == "preload" or ln == "showcase" then return false end
+            if ln == "pool" or ln == "template" or ln == "templates"
+               or ln == "lobby" or ln == "preload" or ln == "showcase" then
+                return false
+            end
         end
         p = p.Parent
     end
@@ -774,7 +969,9 @@ end
 local LootTemplates = nil
 local function getTemplate(name)
     if LootTemplates == nil then
-        local ok, f = pcall(function() return game:GetService("ReplicatedStorage"):FindFirstChild("LootTemplates") end)
+        local ok, f = pcall(function()
+            return game:GetService("ReplicatedStorage"):FindFirstChild("LootTemplates")
+        end)
         LootTemplates = (ok and f) or false
     end
     if not LootTemplates then return nil end
@@ -782,62 +979,22 @@ local function getTemplate(name)
     return (ok and t) or nil
 end
 
--- ===== WEIGHT PARSER (NEW) =====
-local function parseWeight(obj)
-    if not obj then return nil end
-    local function extract(val)
-        if type(val) == "number" then return val end
-        if type(val) == "string" then
-            local num = string.match(val, "([%d%.]+)")
-            if num then return tonumber(num) end
-        end
-        return nil
-    end
-
-    local w = attr(obj, "Weight") or attr(obj, "Mass") or attr(obj, "ItemWeight")
-    local ew = extract(w)
-    if ew then return ew end
-
-    local wObj = obj:FindFirstChild("Weight") or obj:FindFirstChild("Mass")
-    if wObj and wObj:IsA("ValueBase") then
-        local ew2 = extract(wObj.Value)
-        if ew2 then return ew2 end
-    end
-
-    local ok, attrs = pcall(function() return obj:GetAttributes() end)
-    if ok and type(attrs) == "table" then
-        for k, v in pairs(attrs) do
-            local kl = string.lower(tostring(k))
-            if string.find(kl, "weight", 1, true) or string.find(kl, "mass", 1, true) then
-                local ew3 = extract(v)
-                if ew3 then return ew3 end
-            end
-        end
-    end
-
-    local nameWeight = string.match(obj.Name, "([%d%.]+)%s*[kK][gG]")
-    if nameWeight then return tonumber(nameWeight) end
-
-    return nil
-end
-
 -- ===== staged scan =====
 local loot, mons = {}, {}
-local sc = {stage = 0, nextAt = 0, q = {}, qi = 1, nl = {}, nm = {}, cand = nil, ci = 1, seen = {}}
+local sc = {stage = 0, nextAt = 0, q = {}, qi = 1, wq = {}, wi = 1, nl = {}, nm = {}, pNames = {}, seenModels = {}}
 
 local function buildLoot(o)
     local part = getPart(o)
     if not part then return nil end
     local r = attr(o, "Rarity")
     local v = tonumber(attr(o, "Value"))
-    local w = parseWeight(o)
-    
+    local w = tonumber(attr(o, "Weight"))
     if (r == nil or v == nil or w == nil) and ITEM_SET[o.Name] then
         local tmpl = getTemplate(o.Name)
         if tmpl then
             if r == nil then r = attr(tmpl, "Rarity") end
             if v == nil then v = tonumber(attr(tmpl, "Value")) end
-            if w == nil then w = parseWeight(tmpl) end
+            if w == nil then w = tonumber(attr(tmpl, "Weight")) end
         end
     end
     r = r and string.lower(tostring(r)) or nil
@@ -867,10 +1024,12 @@ local function scanStep(now)
                 local f = workspace:FindFirstChild(fn)
                 if f then
                     local ok, kids = pcall(function() return f:GetChildren() end)
-                    if ok and kids then for i = 1, #kids do s.q[#s.q + 1] = kids[i] end end
+                    if ok and kids then
+                        for i = 1, #kids do s.q[#s.q + 1] = kids[i] end
+                    end
                 end
             end
-            s.qi, s.nl, s.nm, s.cand, s.ci, s.seen = 1, {}, {}, nil, 1, {}
+            s.qi, s.nl, s.nm = 1, {}, {}
             s.stage = 1
         end
     elseif s.stage == 1 then
@@ -882,60 +1041,136 @@ local function scanStep(now)
         end
         if s.qi > #s.q then s.stage = 2 end
     elseif s.stage == 2 then
-        if not s.cand then
-            s.cand = {}; s.nm = {}; s.seen = {}
-            for _, p in ipairs(PlayersSvc:GetPlayers()) do
-                local char = p.Character
-                if char then s.seen[char] = true end
-                if p ~= lp and char then
-                    local isDisguised = (attr(p, "TenantDisguise") == true) or (attr(char, "TenantDisguise") == true)
-                    local ek = attr(char, "EntityKind") or attr(p, "EntityKind") or attr(char, "PlayerEntity")
-                    local isEnt = (attr(p, "IsEntity") == true) or isDisguised or (ek ~= nil)
-                    if isDisguised and not CFG.tenant_disguise then isEnt = false end
-                    if isEnt then
-                        local ok, part = pcall(getPart, char)
-                        if ok and part and isRealEntity(char, part) then
-                            local disp = isDisguised and "The Tenant" or (normEntityName(tostring(ek or "")) or p.Name)
-                            local labelTxt = isDisguised and ("[TENANT - DISGUISED] " .. p.Name) or ("[" .. string.upper(disp) .. "] " .. p.Name)
-                            local alertTxt = isDisguised and ("THE TENANT (DISGUISED) [" .. p.Name .. "]") or (string.upper(disp) .. " [" .. p.Name .. "]")
-                            s.nm[#s.nm + 1] = {part = part, base = p.Name, colKey = disp, alertName = alertTxt, h = boxHeight(part), dm = -1, txt = labelTxt, isDisguised = isDisguised}
+        -- players: entity-controlled players (fast)
+        local pNames = {}
+        local seenModels = {}
+        for _, p in ipairs(PlayersSvc:GetPlayers()) do
+            if p.Name then pNames[p.Name] = true end
+            local char = p.Character
+            if char then seenModels[char] = true end
+
+            local isDisguised = (attr(p, "TenantDisguise") == true)
+                or (char and attr(char, "TenantDisguise") == true)
+            local hasPlayerEnt = char and (attr(char, "PlayerEntity") ~= nil)
+            local isEnt = (attr(p, "IsEntity") == true) or isDisguised or hasPlayerEnt
+
+            if char and not isDisguised and not hasPlayerEnt then
+                local okH, hum = pcall(function() return char:FindFirstChild("Humanoid") end)
+                if okH and hum then
+                    local okM, mh = pcall(function() return hum.MaxHealth end)
+                    if okM and type(mh) == "number" then
+                        if mh ~= math.huge and mh <= 200 then
+                            isEnt = false
+                        elseif mh == math.huge then
+                            isEnt = true
                         end
                     end
                 end
             end
-            local root = workspace:FindFirstChild("Monsters") or workspace
-            local ok, kids = pcall(function() return root:GetChildren() end)
-            if ok and kids then for i = 1, #kids do s.cand[#s.cand + 1] = kids[i] end end
-            if root ~= workspace then
-                local ok2, wkids = pcall(function() return workspace:GetChildren() end)
-                if ok2 and wkids then for i = 1, #wkids do s.cand[#s.cand + 1] = wkids[i] end end
+
+            if isDisguised and not CFG.tenant_disguise then
+                isEnt = false
             end
-            s.ci = 1
+
+            if isEnt and char and p ~= lp then
+                local hrp = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("RootPart")
+                if hrp then
+                    local entKind = detectPlayerEntityKind(p, char, isDisguised)
+                    local colKey = entKind or p.Name
+                    local labelTxt
+                    local alertTxt
+                    if isDisguised then
+                        labelTxt = "[TENANT - DISGUISED] " .. p.Name
+                        alertTxt = "THE TENANT (DISGUISED) [" .. p.Name .. "]"
+                    elseif entKind then
+                        labelTxt = "[" .. string.upper(entKind) .. "] " .. p.Name
+                        alertTxt = string.upper(entKind) .. " [" .. p.Name .. "]"
+                    else
+                        labelTxt = "[ENTITY] " .. p.Name
+                        alertTxt = string.upper(p.Name)
+                    end
+                    s.nm[#s.nm + 1] = {
+                        part = hrp,
+                        base = p.Name,
+                        colKey = colKey,
+                        alertName = alertTxt,
+                        h = boxHeight(hrp),
+                        dm = -1,
+                        txt = labelTxt,
+                        isPlayer = true,
+                        isDisguised = isDisguised,
+                        dead = false
+                    }
+                end
+            end
         end
+
+        -- queue workspace models for budgeted stage 3
+        local wq = {}
+        local okw, wkids = pcall(function() return workspace:GetChildren() end)
+        if okw and wkids then
+            for i = 1, #wkids do wq[#wq + 1] = wkids[i] end
+        end
+        for _, folderName in ipairs({"Entities", "Monsters", "AI"}) do
+            local ef = workspace:FindFirstChild(folderName)
+            if ef then
+                local ok, ekids = pcall(function() return ef:GetChildren() end)
+                if ok and ekids then
+                    for i = 1, #ekids do wq[#wq + 1] = ekids[i] end
+                end
+            end
+        end
+
+        s.pNames = pNames
+        s.seenModels = seenModels
+        s.wq = wq
+        s.wi = 1
+        s.stage = 3
+    elseif s.stage == 3 then
+        -- workspace AI models in small batches per frame
         local n = 0
-        while s.ci <= #s.cand and n < 10 do
-            local o = s.cand[s.ci]; s.ci = s.ci + 1; n = n + 1
-            if o and not s.seen[o] then
-                local cls = o.ClassName
-                if cls == "Model" or cls == "Folder" then
-                    local ek = attr(o, "EntityKind")
-                    local mDisguised = (attr(o, "TenantDisguise") == true)
-                    local disp = mDisguised and "The Tenant" or (ek and normEntityName(tostring(ek))) or normEntityName(o.Name)
-                    if disp and (not mDisguised or CFG.tenant_disguise) then
-                        s.seen[o] = true
-                        local ok, part = pcall(getPart, o)
-                        if ok and part and isRealEntity(o, part) then
-                            local labelTxt = mDisguised and ("[TENANT - DISGUISED] " .. o.Name) or disp
-                            local alertTxt = mDisguised and ("THE TENANT (DISGUISED) [" .. o.Name .. "]") or string.upper(disp)
-                            s.nm[#s.nm + 1] = {part = part, base = o.Name, colKey = disp, alertName = alertTxt, h = boxHeight(part), dm = -1, txt = labelTxt, isDisguised = mDisguised}
-                        end
+        local wq = s.wq
+        local seenModels = s.seenModels
+        local pNames = s.pNames
+        while s.wi <= #wq and n < WS_BUDGET do
+            local m = wq[s.wi]; s.wi = s.wi + 1; n = n + 1
+            if m and m.ClassName == "Model" and not seenModels[m] and not pNames[m.Name] and not STATIC_RIGS[m.Name] then
+                local hrp = m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("RootPart")
+                if hrp then
+                    seenModels[m] = true
+                    local mDisguised = (attr(m, "TenantDisguise") == true)
+                    if not mDisguised or CFG.tenant_disguise then
+                        local normName = mDisguised and "The Tenant" or (normEntityName(m.Name) or m.Name)
+                        local labelTxt = mDisguised
+                            and ("[TENANT - DISGUISED] " .. m.Name)
+                            or ("[AI] " .. m.Name)
+                        local alertTxt = mDisguised
+                            and ("THE TENANT (DISGUISED) [" .. m.Name .. "]")
+                            or string.upper(m.Name)
+                        s.nm[#s.nm + 1] = {
+                            part = hrp,
+                            base = m.Name,
+                            colKey = normName,
+                            alertName = alertTxt,
+                            h = boxHeight(hrp),
+                            dm = -1,
+                            txt = labelTxt,
+                            isAI = true,
+                            isDisguised = mDisguised,
+                            dead = false
+                        }
                     end
                 end
             end
         end
-        if s.ci > #s.cand then
+
+        if s.wi > #wq then
             loot, mons = s.nl, s.nm
-            s.stage = 0; s.nextAt = now + SCAN_EVERY; s.cand = nil; s.seen = {}
+            s.wq = {}
+            s.seenModels = {}
+            s.pNames = {}
+            s.stage = 0
+            s.nextAt = now + SCAN_EVERY
         end
     end
 end
@@ -955,7 +1190,12 @@ local function findPrompt(o)
     end
     local p, kids = scan(o)
     if p then return p end
-    if kids then for i = 1, #kids do local p2 = scan(kids[i]); if p2 then return p2 end end end
+    if kids then
+        for i = 1, #kids do
+            local p2 = scan(kids[i])
+            if p2 then return p2 end
+        end
+    end
     return nil
 end
 
@@ -971,9 +1211,16 @@ local function doGrab(mx, my, mz)
         end
     end
     if not best then return end
-    if GRAB_MODE == 2 then pcall(keypress, 0x45); task.spawn(function() task.wait(0.05); pcall(keyrelease, 0x45) end); return end
+    if GRAB_MODE == 2 then
+        pcall(keypress, 0x45)
+        task.spawn(function() task.wait(0.05); pcall(keyrelease, 0x45) end)
+        return
+    end
     local pr = best.prompt
-    if not pr then pr = findPrompt(best.obj); best.prompt = pr or false end
+    if not pr then
+        pr = findPrompt(best.obj)
+        best.prompt = pr or false
+    end
     if not pr then return end
     if not fireproximityprompt then return end
     pcall(fireproximityprompt, pr)
@@ -988,6 +1235,7 @@ local resizeStartX, resizeStartY, resizeStartMW, resizeStartRH = 0, 0, 0, 0
 local listenItem = nil
 local sliding = nil
 local lootMax2 = LOOT_DIST * LOOT_DIST
+local monMax2  = MON_DIST * MON_DIST
 local vpX, vpAt = 960, 0
 local stamAt = 0
 
@@ -995,21 +1243,37 @@ local function step(now)
     frame = frame + 1
     scanStep(now)
 
+    -- infinite stamina
     if now - stamAt >= 0.3 then
         stamAt = now
         if CFG.infstam then
             local cur = lp:GetAttribute("UpgradeStamina")
-            if cur ~= 10000 then if type(cur) == "number" then origStamina = cur end; lp:SetAttribute("UpgradeStamina", 10000) end
+            if cur ~= 10000 then
+                if type(cur) == "number" then origStamina = cur end
+                lp:SetAttribute("UpgradeStamina", 10000)
+            end
         elseif origStamina ~= nil then
-            lp:SetAttribute("UpgradeStamina", origStamina); origStamina = nil
+            lp:SetAttribute("UpgradeStamina", origStamina)
+            origStamina = nil
         end
     end
 
+    -- key rebind / open-close
     if listenItem then
-        if keyDown(0x1B) then listenItem.listen = false; refresh(listenItem); listenItem = nil; wasKey = true
+        if keyDown(0x1B) then
+            listenItem.listen = false
+            refresh(listenItem)
+            listenItem = nil
+            wasKey = true
         else
             local c = scanKey()
-            if c then KEYS[listenItem.key] = c; listenItem.listen = false; refresh(listenItem); listenItem = nil; wasKey = true end
+            if c then
+                KEYS[listenItem.key] = c
+                listenItem.listen = false
+                refresh(listenItem)
+                listenItem = nil
+                wasKey = true
+            end
         end
     else
         local kd = keyDown(KEYS.menu)
@@ -1017,6 +1281,7 @@ local function step(now)
         wasKey = kd
     end
 
+    -- mouse
     local okm, mv = pcall(ismouse1pressed)
     local md = (okm and mv) and true or false
     if menuOpen then
@@ -1024,21 +1289,39 @@ local function step(now)
         if x then
             if popOpen and not minimized then
                 local hc = cellAt(x, y)
-                if hc ~= hovCell then hovCell = hc; if hc then phl.Position = Vector2.new(hc.x - 2, hc.y - 2); phl.Visible = true else phl.Visible = false end end
+                if hc ~= hovCell then
+                    hovCell = hc
+                    if hc then
+                        phl.Position = Vector2.new(hc.x - 2, hc.y - 2)
+                        phl.Visible = true
+                    else
+                        phl.Visible = false
+                    end
+                end
             end
 
             local mbx, mby, mbw, mbh = minBtnRect()
             local inMinBtn = (x >= mbx - 2 and x <= mbx + mbw + 2 and y >= mby - 2 and y <= mby + mbh + 2)
             local onGrip = inGrip(x, y)
 
+            -- tab bar hover tracking
             local newTabHover = nil
             if not minimized then
-                local tabY = MY + curTH; local tabBottom = tabY + curTH
+                local tabY = MY + curTH
+                local tabBottom = tabY + curTH
                 if x >= MX and x <= MX + MW and y >= tabY and y < tabBottom then
-                    for _, btn in ipairs(tabBtns) do if x >= btn.x and x < btn.x + btn.w then newTabHover = btn.name; break end end
+                    for _, btn in ipairs(tabBtns) do
+                        if x >= btn.x and x < btn.x + btn.w then
+                            newTabHover = btn.name
+                            break
+                        end
+                    end
                 end
             end
-            if newTabHover ~= tabHover then tabHover = newTabHover; tabLayout() end
+            if newTabHover ~= tabHover then
+                tabHover = newTabHover
+                tabLayout()
+            end
 
             if md and not wasMouse then
                 local consumed, prev = false, nil
@@ -1046,27 +1329,55 @@ local function step(now)
                     if inPopup(x, y) then
                         consumed = true
                         local cl = cellAt(x, y)
-                        if cl then popIt.t[popIt.key] = cl.col; refresh(popIt); closePopup() end
-                    else prev = popIt; closePopup() end
+                        if cl then
+                            popIt.t[popIt.key] = cl.col
+                            refresh(popIt)
+                            closePopup()
+                        end
+                    else
+                        prev = popIt
+                        closePopup()
+                    end
                 end
                 if not consumed then
+                    -- tab bar click
                     local inTabBar = false
                     if not minimized then
-                        local tabY = MY + curTH; local tabBottom = tabY + curTH
+                        local tabY = MY + curTH
+                        local tabBottom = tabY + curTH
                         if x >= MX and x <= MX + MW and y >= tabY and y < tabBottom then
                             inTabBar = true
-                            for _, btn in ipairs(tabBtns) do if x >= btn.x and x < btn.x + btn.w then switchTab(btn.name); break end end
+                            for _, btn in ipairs(tabBtns) do
+                                if x >= btn.x and x < btn.x + btn.w then
+                                    switchTab(btn.name)
+                                    break
+                                end
+                            end
                         end
                     end
+
                     if inTabBar then
-                    elseif onGrip then resizing = true; resizeStartX, resizeStartY = x, y; resizeStartMW, resizeStartRH = MW, curRH
-                    elseif inMinBtn then minimized = not minimized; layout(); applyMenuVisibility()
-                    elseif x >= MX and x <= MX + MW and y >= MY and y <= MY + curTH then dragging = true; offx, offy = x - MX, y - MY
+                        -- consumed by tab switch
+                    elseif onGrip then
+                        resizing = true
+                        resizeStartX, resizeStartY = x, y
+                        resizeStartMW, resizeStartRH = MW, curRH
+                    elseif inMinBtn then
+                        minimized = not minimized
+                        layout()
+                        applyMenuVisibility()
+                    elseif x >= MX and x <= MX + MW and y >= MY and y <= MY + curTH then
+                        dragging = true
+                        offx, offy = x - MX, y - MY
                     elseif not minimized and x >= MX and x <= MX + MW then
                         for _, it in ipairs(items) do
                             if it.tab == activeTab and it.k ~= "h" and it ~= prev and y >= MY + it.ry and y < MY + it.ry + curRH then
-                                if it.k == "s" or it.k == "w" then if x >= MX + curSL_X - 6 and x <= MX + curSL_X + curSL_W + 6 then sliding = it end
-                                else click(it); if it.listen then listenItem = it end end
+                                if it.k == "s" or it.k == "w" then
+                                    if x >= MX + curSL_X - 6 and x <= MX + curSL_X + curSL_W + 6 then sliding = it end
+                                else
+                                    click(it)
+                                    if it.listen then listenItem = it end
+                                end
                                 break
                             end
                         end
@@ -1076,114 +1387,240 @@ local function step(now)
 
             if resizing then
                 if md then
-                    local dx = x - resizeStartX; local dy = y - resizeStartY
-                    local newMW = clamp(resizeStartMW + dx, MIN_MW, MAX_MW); local newRH = clamp(resizeStartRH + dy * 0.15, MIN_RH, MAX_RH)
+                    local dx = x - resizeStartX
+                    local dy = y - resizeStartY
+                    local newMW = clamp(resizeStartMW + dx, MIN_MW, MAX_MW)
+                    local newRH = clamp(resizeStartRH + dy * 0.15, MIN_RH, MAX_RH)
                     local cam = workspace.CurrentCamera
-                    if cam then local okvx, vx = pcall(function() return cam.ViewportSize.X end); if okvx and type(vx) == "number" and vx > 100 then newMW = math.min(newMW, vx - MX - 16) end end
-                    if newMW ~= MW or newRH ~= curRH then MW = newMW; curRH = newRH; dirty = true end
-                    if dirty and frame % 2 == 0 then dirty = false; layout() end
-                else resizing = false; if dirty then dirty = false; layout() end end
+                    if cam then
+                        local okvx, vx = pcall(function() return cam.ViewportSize.X end)
+                        if okvx and type(vx) == "number" and vx > 100 then
+                            newMW = math.min(newMW, vx - MX - 16)
+                        end
+                    end
+                    if newMW ~= MW or newRH ~= curRH then
+                        MW = newMW
+                        curRH = newRH
+                        dirty = true
+                    end
+                    if dirty and frame % 2 == 0 then
+                        dirty = false
+                        layout()
+                    end
+                else
+                    resizing = false
+                    if dirty then dirty = false; layout() end
+                end
             end
 
             if dragging then
                 if md then
                     local nx, ny = x - offx, y - offy
-                    if nx < 0 then nx = 0 end; if ny < 0 then ny = 0 end
-                    if nx ~= MX or ny ~= MY then MX, MY = nx, ny; dirty = true end
-                    if dirty and frame % 2 == 0 then dirty = false; layout(); hl.Visible = false; hoverIt = nil end
-                else dragging = false; if dirty then dirty = false; layout() end end
+                    if nx < 0 then nx = 0 end
+                    if ny < 0 then ny = 0 end
+                    if nx ~= MX or ny ~= MY then
+                        MX, MY = nx, ny
+                        dirty = true
+                    end
+                    if dirty and frame % 2 == 0 then
+                        dirty = false
+                        layout()
+                        hl.Visible = false
+                        hoverIt = nil
+                    end
+                else
+                    dragging = false
+                    if dirty then dirty = false; layout() end
+                end
             end
 
             if sliding then
                 if md then
                     local f = clamp((x - (MX + curSL_X)) / curSL_W, 0, 1)
                     local v = math.floor(f * sliding.smax / sliding.sstep + 0.5) * sliding.sstep
-                    if v ~= sliding.t[sliding.key] then sliding.t[sliding.key] = v; refresh(sliding) end
-                else sliding = nil end
+                    if v ~= sliding.t[sliding.key] then
+                        sliding.t[sliding.key] = v
+                        refresh(sliding)
+                    end
+                else
+                    sliding = nil
+                end
             end
 
-            minBtn.Color = inMinBtn and ACCENT or C_HOVER; minTxt.Color = inMinBtn and BLACK or WHITE
+            -- hover feedback
+            minBtn.Color = inMinBtn and ACCENT or C_HOVER
+            minTxt.Color = inMinBtn and BLACK or WHITE
             for _, d in ipairs(gripDots) do d.Color = onGrip and ACCENT or C_HEAD end
 
             local hit = nil
-            if not minimized and not dragging and not resizing and not inMinBtn and not onGrip and not tabHover and not (popOpen and inPopup(x, y)) and x >= MX and x <= MX + MW then
-                for _, it in ipairs(items) do if it.tab == activeTab and it.k ~= "h" and y >= MY + it.ry and y < MY + it.ry + curRH then hit = it; break end end
+            if not minimized and not dragging and not resizing and not inMinBtn and not onGrip
+               and not tabHover and not (popOpen and inPopup(x, y)) and x >= MX and x <= MX + MW then
+                for _, it in ipairs(items) do
+                    if it.tab == activeTab and it.k ~= "h" and y >= MY + it.ry and y < MY + it.ry + curRH then
+                        hit = it
+                        break
+                    end
+                end
             end
             if hit ~= hoverIt then
                 hoverIt = hit
-                if hit then hl.Position = Vector2.new(MX + 4, MY + hit.ry); hl.Size = Vector2.new(MW - 8, curRH); hl.Visible = true
-                else hl.Visible = false end
+                if hit then
+                    hl.Position = Vector2.new(MX + 4, MY + hit.ry)
+                    hl.Size = Vector2.new(MW - 8, curRH)
+                    hl.Visible = true
+                else
+                    hl.Visible = false
+                end
             end
         end
-    else dragging = false; sliding = nil; resizing = false; if tabHover ~= nil then tabHover = nil; tabLayout() end end
+    else
+        dragging = false
+        sliding = nil
+        resizing = false
+        if tabHover ~= nil then
+            tabHover = nil
+            tabLayout()
+        end
+    end
     wasMouse = md
 
+    -- player / camera position
     local mx, my, mz
-    local ch = lp.Character; local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-    if hrp then local ok, x, y, z = pcall(xyz, hrp); if ok and x then mx, my, mz = x, y, z end end
+    local ch = lp.Character
+    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        local ok, x, y, z = pcall(xyz, hrp)
+        if ok and x then mx, my, mz = x, y, z end
+    end
     local cam = workspace.CurrentCamera
-    if not mx and cam then local ok, x, y, z = pcall(function() local p = cam.CFrame.Position; return p.X, p.Y, p.Z end); if ok and x then mx, my, mz = x, y, z end end
+    if not mx and cam then
+        local ok, x, y, z = pcall(function()
+            local p = cam.CFrame.Position
+            return p.X, p.Y, p.Z
+        end)
+        if ok and x then mx, my, mz = x, y, z end
+    end
 
     if mx then
-        if CFG.grab and not listenItem and keyDown(KEYS.grab) and now - lastGrab > GRAB_CD then lastGrab = now; doGrab(mx, my, mz) end
+        if CFG.grab and not listenItem and keyDown(KEYS.grab) and now - lastGrab > GRAB_CD then
+            lastGrab = now
+            doGrab(mx, my, mz)
+        end
 
         if cam and now - vpAt > 1 then
             vpAt = now
-            local ok1, vx = pcall(function() return cam.ViewportSize.X end); if ok1 and type(vx) == "number" and vx > 0 then vpX = vx / 2 end
-            local ok2, vy = pcall(function() return cam.ViewportSize.Y end); if ok2 and type(vy) == "number" and vy > 0 then vpHeight = vy end
+            local ok1, vx = pcall(function() return cam.ViewportSize.X end)
+            if ok1 and type(vx) == "number" and vx > 0 then vpX = vx / 2 end
+            local ok2, vy = pcall(function() return cam.ViewportSize.Y end)
+            if ok2 and type(vy) == "number" and vy > 0 then vpHeight = vy end
         end
         local cx = vpX
 
+        -- entities
         local nb, na = 0, 0
         if CFG.master then
             local acol = ACOL.alert
+            local showBox, showLbl, showAlert = CFG.box, CFG.label, CFG.alert
             for i = 1, #mons do
                 local e = mons[i]
-                if not (e.isDisguised and not CFG.tenant_disguise) then
+                if not e.dead and not (e.isDisguised and not CFG.tenant_disguise) then
                     local ok, x, y, z = pcall(xyz, e.part)
                     if ok and x then
                         local dx, dy, dz = x - mx, y - my, z - mz
-                        local d = math.sqrt(dx*dx + dy*dy + dz*dz)
+                        local d2 = dx*dx + dy*dy + dz*dz
+                        if d2 <= monMax2 then
+                            local d = math.sqrt(d2)
 
-                        if CFG.alert and d <= ALERT_DIST and na < 3 then
-                            na = na + 1; local a = alerts[na]
-                            local aname = e.alertName or string.upper(e.base)
-                            local txt = aname .. " " .. math.floor(d) .. "m!"
-                            if a.txt ~= txt then a.txt = txt; a.t.Text = txt end
-                            if a.col ~= acol then a.col = acol; a.t.Color = acol end
-                            a.t.Position = Vector2.new(cx, 70 + (na - 1) * 30)
-                            if not a.on then a.t.Visible = true; a.on = true end
-                        end
+                            if showAlert and d <= ALERT_DIST and na < 3 then
+                                na = na + 1
+                                local a = alerts[na]
+                                local aname = e.alertName or string.upper(e.base)
+                                local txt = aname .. " " .. math.floor(d) .. "m!"
+                                if a.txt ~= txt then a.txt = txt; a.t.Text = txt end
+                                if a.col ~= acol then a.col = acol; a.t.Color = acol end
+                                local ay = 70 + (na - 1) * 30
+                                if a.py ~= ay then a.py = ay; a.t.Position = Vector2.new(cx, ay) end
+                                if not a.on then a.t.Visible = true; a.on = true end
+                            end
 
-                        if (CFG.box or CFG.label) and d <= MON_DIST and nb < BOX_SLOTS then
-                            local half = e.h / 2 * (1 + PAD)
-                            local ok1, s1, on1 = pcall(WorldToScreen, Vector3.new(x, y + half, z))
-                            local ok2, s2, on2 = pcall(WorldToScreen, Vector3.new(x, y - half, z))
-                            if ok1 and ok2 and on1 and on2 and s1 and s2 then
-                                local top = math.min(s1.Y, s2.Y); local bh = math.abs(s2.Y - s1.Y)
-                                if bh > 2 then
-                                    local bw = bh * BOX_RATIO; nb = nb + 1; local bx = boxes[nb]
-                                    local sz = Vector2.new(bw, bh); local ps = Vector2.new(s1.X - bw / 2, top)
-                                    bx.ol.Size = sz; bx.ol.Position = ps; bx.b.Size = sz; bx.b.Position = ps
-                                    local col = MCOL[e.colKey or e.base] or WHITE
-                                    if bx.col ~= col then bx.col = col; bx.b.Color = col; bx.t.Color = col end
-                                    local dm = math.floor(d)
-                                    if e.dm ~= dm then e.dm = dm; e.txt = e.txt:gsub(" %[.-%]$", "") .. " [" .. dm .. "m]" end
-                                    if bx.txt ~= e.txt then bx.txt = e.txt; bx.t.Text = e.txt end
-                                    bx.t.Position = Vector2.new(s1.X, top - LABEL_GAP)
-                                    if bx.sb ~= CFG.box then bx.sb = CFG.box; bx.ol.Visible = CFG.box; bx.b.Visible = CFG.box end
-                                    if bx.st ~= CFG.label then bx.st = CFG.label; bx.t.Visible = CFG.label end
+                            if (showBox or showLbl) and nb < BOX_SLOTS then
+                                local half = e.h / 2 * (1 + PAD)
+                                local ok1, s1, on1 = pcall(WorldToScreen, Vector3.new(x, y + half, z))
+                                local ok2, s2, on2 = pcall(WorldToScreen, Vector3.new(x, y - half, z))
+                                if ok1 and ok2 and on1 and on2 and s1 and s2 then
+                                    local top = math.min(s1.Y, s2.Y)
+                                    local bh = math.abs(s2.Y - s1.Y)
+                                    if bh > 2 then
+                                        local bw = bh * BOX_RATIO
+                                        nb = nb + 1
+                                        local bx = boxes[nb]
+                                        local px = s1.X - bw / 2
+                                        local moved = (math.abs(px - bx.px) >= 0.5 or math.abs(top - bx.py) >= 0.5)
+                                        local resized = (math.abs(bw - bx.w) >= 0.5 or math.abs(bh - bx.h) >= 0.5)
+
+                                        if moved or resized then
+                                            bx.px, bx.py, bx.w, bx.h = px, top, bw, bh
+                                            if showBox then
+                                                local sz = Vector2.new(bw, bh)
+                                                local ps = Vector2.new(px, top)
+                                                bx.ol.Size = sz; bx.ol.Position = ps
+                                                bx.b.Size = sz; bx.b.Position = ps
+                                            end
+                                            if showLbl then
+                                                bx.t.Position = Vector2.new(s1.X, top - LABEL_GAP)
+                                            end
+                                        end
+
+                                        local col = MCOL[e.colKey or e.base] or C(255, 50, 50)
+                                        if bx.col ~= col then bx.col = col; bx.b.Color = col; bx.t.Color = col end
+                                        if showLbl then
+                                            local dm = math.floor(d)
+                                            if e.dm ~= dm then
+                                                e.dm = dm
+                                                if not e.lbl then e.lbl = e.txt end
+                                                e.txt = e.lbl .. " [" .. dm .. "m]"
+                                            end
+                                            if bx.txt ~= e.txt then bx.txt = e.txt; bx.t.Text = e.txt end
+                                        end
+
+                                        if bx.sb ~= showBox then
+                                            bx.sb = showBox
+                                            bx.ol.Visible = showBox
+                                            bx.b.Visible = showBox
+                                            if showBox then
+                                                bx.ol.Size = Vector2.new(bw, bh); bx.ol.Position = Vector2.new(px, top)
+                                                bx.b.Size = Vector2.new(bw, bh); bx.b.Position = Vector2.new(px, top)
+                                            end
+                                        end
+                                        if bx.st ~= showLbl then
+                                            bx.st = showLbl
+                                            bx.t.Visible = showLbl
+                                            if showLbl then
+                                                bx.t.Position = Vector2.new(s1.X, top - LABEL_GAP)
+                                            end
+                                        end
+                                    end
                                 end
                             end
                         end
+                    else
+                        e.dead = true
                     end
                 end
             end
         end
-        for i = nb + 1, BOX_SLOTS do local bx = boxes[i]; if bx.sb or bx.st then bx.ol.Visible = false; bx.b.Visible = false; bx.t.Visible = false; bx.sb = false; bx.st = false end end
-        for i = na + 1, 3 do if alerts[i].on then alerts[i].t.Visible = false; alerts[i].on = false end end
+        for i = nb + 1, BOX_SLOTS do
+            local bx = boxes[i]
+            if bx.sb or bx.st then
+                bx.ol.Visible = false; bx.b.Visible = false; bx.t.Visible = false
+                bx.sb = false; bx.st = false
+            end
+        end
+        for i = na + 1, 3 do
+            if alerts[i].on then alerts[i].t.Visible = false; alerts[i].on = false end
+        end
 
-        -- LOOT ESP
+        -- loot
         if frame % 2 == 0 then
             local vis = 0
             if CFG.master and CFG.loot then
@@ -1192,8 +1629,6 @@ local function step(now)
                     if vis >= POOL then break end
                     local e = loot[i]
                     local show = (e.val >= minv)
-                    
-                    -- Show/Hide Rarity filters
                     if show and e.rk then
                         if e.rk == "common" and not CFG.show_common then show = false end
                         if e.rk == "uncommon" and not CFG.show_uncommon then show = false end
@@ -1203,19 +1638,11 @@ local function step(now)
                         if e.rk == "mythic" and not CFG.show_mythic then show = false end
                         if e.rk == "secret" and not CFG.show_secret then show = false end
                         if e.rk == "boundless" and not CFG.show_boundless then show = false end
-                    end
-                    
-                    -- NEW FIX: Weight filter applies to all items with weight or hides items without weight if filter > 0
-                    if show then
-                        local rkKey = e.rk or "common"
-                        local maxW = CFG["max_weight_" .. rkKey]
-                        if maxW and maxW > 0 then
-                            if not e.weight or e.weight > maxW then
-                                show = false
-                            end
+                        if show then
+                            local maxW = CFG["max_weight_" .. e.rk]
+                            if maxW and maxW > 0 and e.weight and e.weight > maxW then show = false end
                         end
                     end
-
                     if e.isSpecial and CFG.screwdriver then show = true end
 
                     if show then
@@ -1229,7 +1656,10 @@ local function step(now)
                                     vis = vis + 1
                                     local s = pool[vis]
                                     local dm = math.floor(math.sqrt(d2))
-                                    if e.dm ~= dm then e.dm = dm; e.txt = e.base .. " [" .. dm .. "m]" end
+                                    if e.dm ~= dm then
+                                        e.dm = dm
+                                        e.txt = e.base .. " [" .. dm .. "m]"
+                                    end
                                     if s.txt ~= e.txt then s.txt = e.txt; s.t.Text = e.txt end
                                     local col = (e.rk and RCOL[e.rk]) or WHITE
                                     if e.isSpecial and CFG.screwdriver then col = YELLOW end
@@ -1242,7 +1672,10 @@ local function step(now)
                     end
                 end
             end
-            for i = vis + 1, used do pool[i].t.Visible = false; pool[i].on = false end
+            for i = vis + 1, used do
+                pool[i].t.Visible = false
+                pool[i].on = false
+            end
             used = vis
         end
     end
