@@ -91,6 +91,7 @@ local MCOL = {
     ["The Lurker"]  = C(80,220,80),
     ["The Wraith"]  = C(140,160,255),
     ["The Tenant"]  = C(255,235,70),
+    ["The Lanky"]  = C(255,235,70),
 }
 local ACOL = {alert = C(255,60,60)}
 local BASE = {Part=1, MeshPart=1, UnionOperation=1, WedgePart=1}
@@ -105,6 +106,7 @@ local ENTITY_ALIASES = {
     wraith  = "The Wraith",  ["the wraith"]  = "The Wraith",
     ["the maternal wraith"] = "The Wraith",
     tenant  = "The Tenant",  ["the tenant"]  = "The Tenant",
+    lanky   = "The Lanky",   ["the lanky"]   = "The Lanky",
 }
 
 local ITEMS = {
@@ -762,6 +764,7 @@ local function resetConfig()
     MCOL["The Lurker"]  = C(80,220,80)
     MCOL["The Wraith"]  = C(140,160,255)
     MCOL["The Tenant"]  = C(255,235,70)
+    MCOL["The Lanky"]   = C(255,235,70)
     ACOL.alert = C(255,60,60)
     MW = DEFAULT_SIZE.mw
     curRH = DEFAULT_SIZE.rh
